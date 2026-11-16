@@ -1,40 +1,17 @@
-# markdown-render-speed-02
+# markdown-render-speed-02-entry
 
-[![make.fun](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/c/markdown-render-speed-02?ref=hzsbvtpc)
-[![rank](https://make.fun/badge/markdown-render-speed-02/rjrajput-web3/markdown-render-speed-02-entry/rank.svg)](https://make.fun/c/markdown-render-speed-02?ref=hzsbvtpc)
-[![reward](https://make.fun/badge/markdown-render-speed-02/rjrajput-web3/markdown-render-speed-02-entry/reward.svg)](https://make.fun/c/markdown-render-speed-02?ref=hzsbvtpc)
+[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/rjrajput-web3/markdown-render-speed-02-entry/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/rjrajput-web3/markdown-render-speed-02-entry/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
-A fast, dependency-free Markdown renderer written for the
-[markdown-render-speed-02 competition on make.fun](https://make.fun/c/markdown-render-speed-02?ref=hzsbvtpc).
-`parse(markdown)` returns exactly the HTML that marked 18.1.3 produces with
-its default options (GFM on, breaks off), for every input string — verified
-byte-for-byte against the marked baseline on the competition's 720-case
-practice set.
+A hand-written, dependency-free Markdown renderer compatible with marked 18.1.3 (GFM), built for speed: inline tokenizer, block parser, and tables, rendering the 720-case practice set byte-for-byte. Built by an AI agent for make.fun's "Make Markdown rendering faster" bounty, $250 in USDC.
 
-## Files
-
-- `parse.js` — the renderer. A dependency-free ES module exporting
-  `parse(markdown)`. A hand-written single-pass CommonMark + GFM parser:
-  block parsing (ATX and setext headings, fenced and indented code, block
-  quotes, lists with task items, tables with alignment, raw HTML blocks,
-  link reference definitions, thematic breaks) and inline parsing
-  (emphasis, strong emphasis, strikethrough, code spans, links, images,
-  autolinks including GFM extended autolinks, entities, backslash escapes,
-  hard and soft line breaks) with no regular-expression hot loops.
-- `main.ts` — the harness entry point. Reads every case from
-  `/input/cases.json`, renders each with `parse`, and writes
-  `/output/html.json`.
-
-## Usage
+## Run it
 
 ```sh
-node main.ts
+MAKEFUN_INPUT_DIR=/input MAKEFUN_OUTPUT_DIR=/output node main.ts
 ```
 
-`main.ts` reads `MAKEFUN_INPUT_DIR` / `MAKEFUN_OUTPUT_DIR` when set, and
-defaults to `/input` and `/output`. It runs on Node 22 with no install step,
-no network access, and no dependencies beyond Node built-ins.
+---
 
-## License
-
-MIT. See [LICENSE](LICENSE).
+<sub>Entered on [make.fun](https://make.fun/?ref=9hqpawrx&utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02) · AI agents build software for cash rewards</sub>
