@@ -1215,6 +1215,69 @@ function tryAngleAutolink(s, i) {
 // seen; suppresses bare autolinks for the rest of the parse() call.
 let bareOff = false;
 
+// suppressEndAfterLink(src, from, labelRaw): index where the emphasis
+// suppression caused by an unclosed backtick in a link label ends.
+// One unclosed run stops at the next backtick ('[a ``b]' -> the '`'
+// before 'deno'). Two or more unclosed runs stop at the first later
+// run with the FIRST unclosed run's length ('[docs each ``url`]'
+// -> the '``' before ' a '), falling back to the first run of any
+// unclosed length ('[a ``b` c](u) *em* [d `e`](v)' -> the '`'
+// before 'e'; '[a ``b` c](u) *em* `f` *em2*' -> the '`' before 'f',
+// so '*em2*' forms). No later backtick at all -> no suppression.
+function suppressEndAfterLink(src, from, labelRaw) {
+  const lens = [];
+  let i = 0;
+  const ln = labelRaw.length;
+  while (i < ln) {
+    const c = labelRaw.charCodeAt(i);
+    if (c === 92) { i += 2; continue; }
+    if (c === 96) {
+      let m = 0;
+      while (i + m < ln && labelRaw.charCodeAt(i + m) === 96) m++;
+      let j = i + m;
+      let found = false;
+      while (j < ln) {
+        const cj = labelRaw.charCodeAt(j);
+        if (cj === 92) { j += 2; continue; }
+        if (cj === 96) {
+          let k = 0;
+          while (j + k < ln && labelRaw.charCodeAt(j + k) === 96) k++;
+          if (k === m) { found = true; break; }
+          j += k;
+          continue;
+        }
+        j++;
+      }
+      if (!found) lens.push(m);
+      i += m;
+      continue;
+    }
+    i++;
+  }
+  const n = src.length;
+  const firstBacktick = src.indexOf('`', from);
+  if (firstBacktick === -1) return -1;
+  if (lens.length <= 1) return firstBacktick;
+  const firstLen = lens[0];
+  const lenSet = new Set(lens);
+  let p = from;
+  let fallback = -1;
+  while (p < n) {
+    const c = src.charCodeAt(p);
+    if (c === 92) { p += 2; continue; }
+    if (c === 96) {
+      let m = 0;
+      while (p + m < n && src.charCodeAt(p + m) === 96) m++;
+      if (m === firstLen) return p;
+      if (fallback === -1 && lenSet.has(m)) fallback = p;
+      p += m;
+      continue;
+    }
+    p++;
+  }
+  return fallback !== -1 ? fallback : firstBacktick;
+}
+
 function tokenizeInline(src, refs, noLinks, noBare) {
   const tokens = [];
   const n = src.length;
@@ -1339,8 +1402,8 @@ function tokenizeInline(src, refs, noLinks, noBare) {
         // A link whose label holds an unclosed backtick run suppresses
         // emphasis until the next backtick (see suppressEmphUntil).
         if (r.labelRaw && labelHasUnclosedBacktick(r.labelRaw)) {
-          const nx = src.indexOf('`', i);
-          if (nx !== -1) suppressEmphUntil = nx;
+          const se = suppressEndAfterLink(src, i, r.labelRaw);
+          if (se !== -1) suppressEmphUntil = se;
         }
         continue;
       }
@@ -1368,8 +1431,8 @@ function tokenizeInline(src, refs, noLinks, noBare) {
         i = r.end;
         textStart = i;
         if (r.labelRaw && labelHasUnclosedBacktick(r.labelRaw)) {
-          const nx = src.indexOf('`', i);
-          if (nx !== -1) suppressEmphUntil = nx;
+          const se = suppressEndAfterLink(src, i, r.labelRaw);
+          if (se !== -1) suppressEmphUntil = se;
         }
         continue;
       }
