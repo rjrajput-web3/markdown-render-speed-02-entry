@@ -385,7 +385,11 @@ function findRefLabelEnd(s, start) {
 // run of the same length). E.g. '[a ``b` c]' has two unclosed runs;
 // '[a `b` c]' pairs into a code span and has none.
 function labelHasUnclosedBacktick(label) {
-  const open = new Map();
+  // A backtick run pairs with the NEXT run of the same length (the
+  // code-span closer); runs inside that span's content are not
+  // delimiters at all. So '`` a ` b ``' (runs 2,1,2) has NO
+  // unclosed backtick: the (2)s pair and the (1) is span content.
+  // A run with no later run of the same length is unclosed.
   let i = 0;
   const n = label.length;
   while (i < n) {
@@ -394,15 +398,26 @@ function labelHasUnclosedBacktick(label) {
     if (c === 96) {
       let m = 0;
       while (i + m < n && label.charCodeAt(i + m) === 96) m++;
-      const cnt = open.get(m) || 0;
-      if (cnt > 0) open.set(m, cnt - 1);
-      else open.set(m, cnt + 1);
-      i += m;
+      let j = i + m;
+      let found = -1;
+      while (j < n) {
+        const cj = label.charCodeAt(j);
+        if (cj === 92) { j += 2; continue; }
+        if (cj === 96) {
+          let k = 0;
+          while (j + k < n && label.charCodeAt(j + k) === 96) k++;
+          if (k === m) { found = j; break; }
+          j += k;
+          continue;
+        }
+        j++;
+      }
+      if (found === -1) return true;
+      i = found + m;
       continue;
     }
     i++;
   }
-  for (const v of open.values()) if (v > 0) return true;
   return false;
 }
 
@@ -424,8 +439,11 @@ function hasUnescapedOpenBracket(s) {
 // run (the label-validity rule of findLabelEnd). Used to vet a
 // candidate label end found inside a code span's content.
 function labelBackticksValid(label) {
-  const open = new Map();
+  // Same pairing as labelHasUnclosedBacktick: a run pairs with the
+  // NEXT run of the same length; runs inside a span's content are
+  // not delimiters. Counts spans formed and runs left unclosed.
   let spans = 0;
+  let unclosed = 0;
   let i = 0;
   const n = label.length;
   while (i < n) {
@@ -434,16 +452,26 @@ function labelBackticksValid(label) {
     if (c === 96) {
       let m = 0;
       while (i + m < n && label.charCodeAt(i + m) === 96) m++;
-      const cnt = open.get(m) || 0;
-      if (cnt > 0) { open.set(m, cnt - 1); spans++; }
-      else open.set(m, cnt + 1);
-      i += m;
+      let j = i + m;
+      let found = -1;
+      while (j < n) {
+        const cj = label.charCodeAt(j);
+        if (cj === 92) { j += 2; continue; }
+        if (cj === 96) {
+          let k = 0;
+          while (j + k < n && label.charCodeAt(j + k) === 96) k++;
+          if (k === m) { found = j; break; }
+          j += k;
+          continue;
+        }
+        j++;
+      }
+      if (found === -1) { unclosed++; i += m; }
+      else { spans++; i = found + m; }
       continue;
     }
     i++;
   }
-  let unclosed = 0;
-  for (const v of open.values()) unclosed += v;
   return !(unclosed > 0 && (spans > 0 || unclosed === 1));
 }
 
