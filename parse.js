@@ -199,22 +199,21 @@ function parseLabel(s, j) {
     const ch = s[i];
     if (ch === '\\' && i + 1 < n) { i += 2; continue; }
     if (ch === '`') {
-      // a code span inside the label: skip to its closing run so a ']'
-      // inside the span does not end the label
+      // a code span inside the label: skip to its closing run (any
+      // length, per marked's label pattern) so a ']' inside the span
+      // does not end the label. A backtick run with no closer makes the
+      // label invalid, unless it is 2+ backticks right before the ']'.
       let m = 0;
       while (i + m < n && s[i + m] === '`') m++;
-      let k = i + m, found = -1;
-      while (k < n) {
-        const b = s.indexOf('`', k);
-        if (b < 0) break;
+      const b = s.indexOf('`', i + m);
+      if (b >= 0) {
         let mm = 0;
         while (b + mm < n && s[b + mm] === '`') mm++;
-        if (mm === m) { found = b; break; }
-        k = b + mm;
+        i = b + mm;
+        continue;
       }
-      if (found >= 0) { i = found + m; continue; }
-      i += m;
-      continue;
+      if (m >= 2 && s[i + m] === ']') { i += m; continue; }
+      return null;
     }
     if (ch === '<') {
       // a ']' inside an autolink or raw HTML tag does not end the label
@@ -329,26 +328,58 @@ function scanBareUrl(s, i) {
   return j;
 }
 
-// Trim trailing punctuation from a bare-URL candidate, including unbalanced
-// trailing ')' characters.
+// Trim trailing punctuation from a bare-URL candidate, following marked's
+// backpedal rule (applied to a fixed point): a run of safe chars, a
+// balanced ( ... ) pair, an '&' that is not an entity ending the string,
+// or a punctuation run that does not reach the end. A trailing
+// punctuation run is dropped in full; a trailing ')' survives only as
+// part of a balanced pair.
 function trimBareUrl(s) {
-  let end = s.length;
-  while (end > 0) {
-    const c = s[end - 1];
-    if (c === ')') {
-      let open = 0, close = 0;
-      for (let k = 0; k < end; k++) { if (s[k] === '(') open++; else if (s[k] === ')') close++; }
-      if (close > open) { end--; continue; }
-      break;
+  const n = s.length;
+  const PUNCT = new Set(['?', '!', '.', ',', ':', ';', '*', '_', "'", '"', '~', ')']);
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    if (c === '(') {
+      let j = i + 1;
+      while (j < n && s[j] !== ')') j++;
+      if (j >= n) break;
+      i = j + 1;
+      continue;
     }
-    if (c === '?' || c === '!' || c === '.' || c === ',' || c === ':' || c === ';' || c === '*' || c === '_' || c === '~' || c === "'") { end--; continue; }
-    break;
+    if (c === '&') {
+      // an '&name;' entity ending the string is not part of the URL
+      let j = i + 1;
+      if (j < n && isAlnum(s[j])) {
+        j++;
+        while (j < n && isAlnum(s[j])) j++;
+        if (j < n && s[j] === ';' && j + 1 === n) break;
+      }
+      i++;
+      continue;
+    }
+    if (PUNCT.has(c)) {
+      let j = i;
+      while (j < n && PUNCT.has(s[j])) j++;
+      if (j >= n) break;
+      i = j;
+      continue;
+    }
+    let j = i;
+    while (j < n) {
+      const d = s[j];
+      if (d === '(' || d === '&' || PUNCT.has(d)) break;
+      j++;
+    }
+    i = j;
   }
-  return s.slice(0, end);
+  return s.slice(0, i);
 }
 
-// Validate a // URL authority: [userinfo@]host[:port], host non-empty and
-// made of [A-Za-z0-9._-]+.
+// Validate a // URL authority: [userinfo@]host[:port]. Marked's url rule
+// only requires a domain prefix after '://' (a run of labels, optional
+// trailing dot); characters after that prefix (')', ']', '\', ...) do not
+// invalidate the URL.
 function validSlashAuthority(auth) {
   if (!auth) return false;
   const at = auth.lastIndexOf('@');
@@ -357,11 +388,10 @@ function validSlashAuthority(auth) {
   const colon = hostport.lastIndexOf(':');
   const host = colon >= 0 ? hostport.slice(0, colon) : hostport;
   if (!host) return false;
-  for (let i = 0; i < host.length; i++) {
-    const c = host[i];
-    if (!(isAlnum(c) || c === '.' || c === '_' || c === '-')) return false;
-  }
-  return true;
+  const m = host.match(/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.?/);
+  if (!m || !m[0]) return false;
+  for (let k = 0; k < m[0].length; k++) if (isAlnum(m[0][k])) return true;
+  return false;
 }
 
 // Try a bare autolink at s[i] (i is a letter or the 'w' of 'www.'). The
@@ -1284,6 +1314,10 @@ export function parse(src) {
   function onBlankLine() {
     for (let si = stack.length - 1; si >= 1; si--) {
       const c = stack[si];
+      if (c.t === 'item') c.prevBlank = true;
+    }
+    for (let si = stack.length - 1; si >= 1; si--) {
+      const c = stack[si];
       if (c.t === 'quote') {
         if (c.closed) continue;
         return;
@@ -1424,11 +1458,12 @@ export function parse(src) {
   function lazyLineContent(k, para) {
     let content = curRest(k);
     const ind = curIndent(k);
-    if (para.lastLazy) {
-      if (para.inQuote && ind < 4 && /^[ \t]*=+[ \t]*$/.test(content)) {
-        content = '    ' + content.replace(/^[ \t]+/, '');
-      }
+    if (para.lastLazy && para.inQuote && ind < 4 && /^[ \t]*=+[ \t]*$/.test(content)) {
+      content = '    ' + content.replace(/^[ \t]+/, '');
     } else if (ind >= 4) {
+      // a lazy line indented 4+ columns is an indented code block in
+      // marked's item re-lex; its content (4 columns stripped) merges
+      // into the paragraph text — on every lazy line, not just the first
       curAdvance(k, 4);
       content = curRest(k);
     }
@@ -1436,12 +1471,40 @@ export function parse(src) {
   }
   function matchQuote(k) {
     const save = saveK(k);
+    const acEntry = k.ac, pStart = k.p;
     const ind = curIndent(k);
     if (ind > 3) return false;
     curAdvance(k, ind);
     if (curPeek(k) !== '>') { restoreK(k, save); return false; }
     k.p++; k.ac++; k.rc++;
-    if (!curAtEol(k)) curAdvance(k, 1);
+    // marked's blockquote tab rule: the whitespace run after '>' has its
+    // tabs expanded with tab stops relative to the marker's string length
+    // (bLen columns from the container content start), then the marker
+    // plus one whitespace char is removed. Do the same by rewriting the
+    // line: the expanded whitespace replaces the run, minus its first char.
+    const bLen = k.ac - acEntry; // columns of the ' {0,3}>' prefix
+    const s = k.s;
+    let q = k.p;
+    while (q < s.length && (s[q] === ' ' || s[q] === '\t')) q++;
+    if (q > k.p) {
+      const m = s.slice(k.p, q);
+      let col = bLen, exp = '';
+      for (let ci = 0; ci < m.length; ci++) {
+        const ch = m[ci];
+        if (ch === '\t') { const r = 4 - (col % 4); exp += ' '.repeat(r); col += r; }
+        else { exp += ' '; col++; }
+      }
+      if (exp.indexOf('\t') < 0 && exp === m) {
+        // no tab in the run: just consume one whitespace char as before
+        if (!curAtEol(k)) curAdvance(k, 1);
+      } else {
+        const newS = s.slice(0, k.p - 1) + exp.slice(1) + s.slice(q);
+        k.s = newS;
+        k.p = k.p - 1;
+        k.ac = acEntry + bLen - 1;
+        k.part = 0;
+      }
+    }
     return true;
   }
   function matchItem(k, item) {
@@ -1449,6 +1512,66 @@ export function parse(src) {
     const ind = curIndent(k);
     if (ind < item.contentIndent) return false;
     curAdvance(k, item.contentIndent);
+    return true;
+  }
+
+  // marked's list-item continuation rule: a line that does not match an
+  // item's content indent is still kept as item content unless it starts
+  // a block, follows a blank line, or follows a block-start / deeply
+  // indented line. (marked list tokenizer.)
+  function isFenceBegin(k) {
+    const ch = curPeek(k);
+    if (ch !== '`' && ch !== '~') return false;
+    let len = 0;
+    const save = saveK(k);
+    while (curPeek(k) === ch) { k.p++; k.ac++; k.rc++; len++; }
+    restoreK(k, save);
+    return len >= 3;
+  }
+  function startsBlockAt(k, R) {
+    const ind = curIndent(k);
+    if (ind > R) return false;
+    const save = saveK(k);
+    curAdvance(k, curIndent(k));
+    const ch = curPeek(k);
+    let r = false;
+    if (ch === '#') r = isAtxStart(k);
+    else if (ch === '`' || ch === '~') r = isFenceBegin(k);
+    else if (ch === '<') r = isHtml16(k);
+    else if (ch === '>') r = true;
+    else if (ch === '-' || ch === '_' || ch === '*' || ch === '+' || (ch >= '0' && ch <= '9')) r = isThematicBreak(k) || isListStart(k, false);
+    restoreK(k, save);
+    return r;
+  }
+  function firstNonSpaceCol(s) {
+    let i = 0, col = 0;
+    while (i < s.length) {
+      const c = s.charAt(i);
+      if (c === ' ') { col += 1; i += 1; }
+      else if (c === '\t') { col += 4; i += 1; }
+      else break;
+    }
+    return col;
+  }
+  function prevContentIsBlockStart(s, R) {
+    if (!s) return false;
+    const k2 = curInit(s);
+    const ind = curIndent(k2);
+    if (ind > R) return false;
+    curAdvance(k2, ind);
+    const ch = curPeek(k2);
+    if (ch === '#') return isAtxStart(k2);
+    if (ch === '`' || ch === '~') return isFenceBegin(k2);
+    if (ch === '<') return isHtml16(k2);
+    if (ch === '-' || ch === '_' || ch === '*') return isThematicBreak(k2);
+    return false;
+  }
+  function keepItemLine(k, item) {
+    const R = item.contentIndent;
+    if (startsBlockAt(k, R)) return false;
+    if (item.prevBlank) return false;
+    if (prevContentIsBlockStart(item.prevContent, R)) return false;
+    if (firstNonSpaceCol(item.prevContent) >= 4) return false;
     return true;
   }
 
@@ -1539,7 +1662,7 @@ export function parse(src) {
   }
   function addItem(list, m, k) {
     if (list.sawBlank) { list.loose = true; list.tight = false; list.sawBlank = false; }
-    const item = { t: 'item', contentIndent: m.contentIndent, children: [], sawBlank: false, closed: false };
+    const item = { t: 'item', contentIndent: m.contentIndent, children: [], sawBlank: false, closed: false, prevBlank: false, prevContent: '' };
     list.children.push(item);
     stack.push(item);
     k.rc = 0;
@@ -1678,6 +1801,17 @@ export function parse(src) {
   }
 
   function parseAtCursor(k) {
+    // record this line as the innermost open item's previous content line
+    // (marked list continuation: prevBlank / prevContent checks)
+    for (let si = stack.length - 1; si >= 1; si--) {
+      if (stack[si].t === 'item') {
+        const it = stack[si];
+        const r0 = curRest(k);
+        if (/^[ \t]*$/.test(r0)) it.prevBlank = true;
+        else { it.prevContent = r0; it.prevBlank = false; }
+        break;
+      }
+    }
     if (cur) {
       if (cur.t === 'code' && cur.fenced) {
         const ind = indentOf(k);
@@ -1704,7 +1838,7 @@ export function parse(src) {
         if (/^[ \t]*$/.test(rest)) { cur.lines.push(''); return; }
         if (indentOf(k) >= 4) {
           curAdvance(k, 4);
-          cur.lines.push(curRest(k));
+          cur.lines.push(curRestRaw(k));
           return;
         }
         closeLeaf();
@@ -1826,6 +1960,9 @@ export function parse(src) {
     const line = lines[li];
     const k = curInit(line);
     if (isBlankLine(line)) {
+      // a blank line is part of every open item's text (prevBlank for the
+      // list continuation rule), even when it is fence/table content
+      for (let si = 1; si < stack.length; si++) if (stack[si].t === 'item') stack[si].prevBlank = true;
       // A blank line is leaf content only when it really reaches the leaf's
       // containers (a blank line with no blockquote marker is outside a
       // fenced block that lives in a quote). Run the container matching to
@@ -1903,14 +2040,17 @@ export function parse(src) {
       } else if (c.t === 'list') {
         depth = si;
       } else if (c.t === 'item') {
-        if (!matchItem(k, c)) {
+        if (curAtEol(k)) {
+          // blank after the container prefixes (e.g. a bare '>' line):
+          // a blank line belongs to the item, it does not end it
+          k.rc = 0; depth = si;
+        } else if (!matchItem(k, c)) {
           if (cur && cur.t === 'para' && !startsInterrupting(k) && !(indentOf(k) <= 3 && isListStart(k, false))) lazy = true;
-          // a fenced code block keeps content lines even when they do not
-          // meet the item's content indent (the block only ends at its fence)
-          if (cur && cur.t === 'code' && cur.fenced) depth = stack.length - 1;
+          else if (si === stack.length - 1 && keepItemLine(k, c)) depth = stack.length - 1;
           break;
+        } else {
+          k.rc = 0; depth = si;
         }
-        k.rc = 0; depth = si;
       }
     }
     if (lazy) {
