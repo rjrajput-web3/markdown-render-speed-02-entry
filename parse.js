@@ -1380,6 +1380,13 @@ function tokenizeInline(src, refs, noLinks, noBare) {
         // work). Tracked per parse() call; only the render pass
         // tokenizes inline content, so it is set in document order.
         const tag = src.slice(i, h);
+        // A '</a>' closing tag clears the suppression (bare autolinks
+        // work again after it).
+        if (tag.length >= 4 && tag.charCodeAt(1) === 47 &&
+          (tag.charCodeAt(2) === 97 || tag.charCodeAt(2) === 65) &&
+          (tag.charCodeAt(3) === 32 || tag.charCodeAt(3) === 9 || tag.charCodeAt(3) === 10 || tag.charCodeAt(3) === 62)) {
+          bareOff = false;
+        }
         if (tag.length >= 5 && (tag.charCodeAt(1) === 97 || tag.charCodeAt(1) === 65) &&
           (tag.charCodeAt(2) === 32 || tag.charCodeAt(2) === 9 || tag.charCodeAt(2) === 10 || tag.charCodeAt(2) === 47 || tag.charCodeAt(2) === 62) &&
           tag.charCodeAt(tag.length - 2) === 47 && tag.charCodeAt(tag.length - 1) === 62 &&
