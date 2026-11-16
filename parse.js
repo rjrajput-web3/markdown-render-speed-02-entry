@@ -2488,8 +2488,14 @@ function parseBlocks(lines, lo, hi, refs, out, opts) {
     if (fence) {
       const contentLines = [];
       let j = i + 1;
+      // Inside a blockquote the fence content keeps its indent after
+      // the '>' prefix is stripped: the fence indent is not stripped
+      // a second time ('>    ~~~js' keeps '   foo', not 'foo').
+      // Marked quirk: tilde fences (~~~) do NOT strip the fence indent
+      // from content lines; backtick fences do. (' ~~~js' keeps ' bar'.)
+      const stripN = fence.ch === 126 ? 0 : fence.indent;
       while (j < hi && !isFenceClose(lines[j], fence)) {
-        contentLines.push(stripFenceIndent(lines[j], fence.indent));
+        contentLines.push(stripFenceIndent(lines[j], stripN));
         j++;
       }
       const content = contentLines.length ? contentLines.join('\n') : '';
