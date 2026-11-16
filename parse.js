@@ -1183,6 +1183,10 @@ function tryAngleAutolink(s, i) {
 // formed (they are plain text) — used for link labels, where only real
 // links and angle autolinks count as nested links. Angle autolinks
 // always run, even in labels.
+// bareOff: set when a self-closing '<a ... />' followed by text is
+// seen; suppresses bare autolinks for the rest of the parse() call.
+let bareOff = false;
+
 function tokenizeInline(src, refs, noLinks, noBare) {
   const tokens = [];
   const n = src.length;
@@ -1368,6 +1372,23 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       if (h !== -1) {
         flush(i);
         tokens.push({ k: 3, s: src.slice(i, h) });
+        // A self-closing '<a ... />' followed by non-whitespace text
+        // in the same inline run suppresses all later BARE autolinks
+        // (scheme/www/email) for the rest of the document (marked
+        // quirk: '<a  />foo' kills later autolinks; '<a>foo' and a
+        // lone '<a  />' do not; angle autolinks and '[x](u)' still
+        // work). Tracked per parse() call; only the render pass
+        // tokenizes inline content, so it is set in document order.
+        const tag = src.slice(i, h);
+        if (tag.length >= 5 && (tag.charCodeAt(1) === 97 || tag.charCodeAt(1) === 65) &&
+          (tag.charCodeAt(2) === 32 || tag.charCodeAt(2) === 9 || tag.charCodeAt(2) === 10 || tag.charCodeAt(2) === 47 || tag.charCodeAt(2) === 62) &&
+          tag.charCodeAt(tag.length - 2) === 47 && tag.charCodeAt(tag.length - 1) === 62 &&
+          (tag.charCodeAt(tag.length - 3) === 32 || tag.charCodeAt(tag.length - 3) === 9 || tag.charCodeAt(tag.length - 3) === 10)) {
+          for (let q = h; q < n; q++) {
+            const qc = src.charCodeAt(q);
+            if (qc !== 32 && qc !== 9 && qc !== 10) { bareOff = true; break; }
+          }
+        }
         i = h;
         textStart = i;
         continue;
@@ -1387,7 +1408,7 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       i++;
       continue;
     }
-    if (!noBare && c === 119 && src.charCodeAt(i + 1) === 119 && src.charCodeAt(i + 2) === 119 &&
+    if (!noBare && !bareOff && c === 119 && src.charCodeAt(i + 1) === 119 && src.charCodeAt(i + 2) === 119 &&
       src.charCodeAt(i + 3) === 46) { // 'www.'
       const prev = i > 0 ? src.charCodeAt(i - 1) : -1;
       const r = tryWwwAutolink(src, i, prev);
@@ -1401,7 +1422,7 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       i++;
       continue;
     }
-    if (!noBare && (c === 104 || c === 72 || c === 102 || c === 70)) { // h/H/f/F scheme://
+    if (!noBare && !bareOff && (c === 104 || c === 72 || c === 102 || c === 70)) { // h/H/f/F scheme://
       const r = trySchemeAutolink(src, i);
       if (r) {
         flush(i);
@@ -1413,7 +1434,7 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       i++;
       continue;
     }
-    if (c === 64 && !noBare) { // '@' email autolink (may backtrack into the text run)
+    if (c === 64 && !noBare && !bareOff) { // '@' email autolink (may backtrack into the text run)
       // An unmatched '_' opener earlier in this inline run means a '_'
       // at a domain-label boundary is an emphasis closer, not part of
       // the domain (e.g. '_used first@sprout.example.com_,').
@@ -2683,6 +2704,7 @@ export function parse(markdown) {
   const lines = src.split('\n');
   if (src.endsWith('\n')) lines.pop();
   const refs = new Map();
+  bareOff = false;
   const opts = { endsNL: src.endsWith('\n') };
   // Collect pass (out null): walk the whole block structure once so that
   // forward link reference definitions — including ones inside blockquotes
