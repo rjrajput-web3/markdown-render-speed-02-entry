@@ -1630,6 +1630,22 @@ function processEmphasis(tokens) {
     // the emphasis ('**a **c**d* e**' -> '<em>*a ...'). Otherwise
     // (closer length 1, e.g. '**foo*') it renders OUTSIDE.
     if (use === 1 && closer.n >= 2) opener.leftoverInside = true;
+    // The closer's leftover delimiter renders INSIDE its tag when the
+    // match is a STRONG (use=2) and an inner EM pair sits strictly
+    // between opener and closer whose closer is immediately followed
+    // by a non-space char ('**return that *old*two***' -> 'two*</strong>';
+    // '**a *b*c***' -> 'c*</strong>'). An EM outer match ('*changes
+    // *else*returns**') and a space after the inner closer ('**a *b*
+    // c***', '**a b***') keep the leftover OUTSIDE, after the tag.
+    if (use === 2 && closer.n - use > 0) {
+      for (let p = 0; p < matchedPairs.length; p++) {
+        const pr = matchedPairs[p];
+        if (pr[0] > oi && pr[1] < i && pr[2] === 1) {
+          const nx = stack[pr[1]].nx;
+          if (nx !== 32 && nx !== 9 && nx !== 10 && nx !== -1 && nx !== undefined) { closer.closeLeftoverInside = true; break; }
+        }
+      }
+    }
     opener.n -= use;
     closer.n -= use;
     matchedPairs.push([oi, i, use]);
@@ -1644,16 +1660,24 @@ function renderTokens(tokens) {
   for (const t of tokens) {
     if (t.k === 0) out += escapeText(t.s);
     else if (t.k === 1) {
-      if (t.closeTags !== null) for (const tag of t.closeTags) out += '</' + tag + '>';
-      // An opener whose match was capped (use=1, closer length >= 2)
-      // renders its leftover delimiter INSIDE the tag; all other
-      // leftovers render OUTSIDE (before the open tag).
-      if (t.leftoverInside) {
+      const leftover = t.n > 0 ? t.c.repeat(t.n) : '';
+      if (t.closeLeftoverInside && leftover) {
+        // Closer leftover inside its tag ('two*</strong>').
+        out += leftover;
+        if (t.closeTags !== null) for (const tag of t.closeTags) out += '</' + tag + '>';
         if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
-        if (t.n > 0) out += t.c.repeat(t.n);
       } else {
-        if (t.n > 0) out += t.c.repeat(t.n);
-        if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+        if (t.closeTags !== null) for (const tag of t.closeTags) out += '</' + tag + '>';
+        // An opener whose match was capped (use=1, closer length >= 2)
+        // renders its leftover delimiter INSIDE the tag; all other
+        // leftovers render OUTSIDE (before the open tag).
+        if (t.leftoverInside) {
+          if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+          out += leftover;
+        } else {
+          out += leftover;
+          if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+        }
       }
     } else if (t.k === 2) out += '<code>' + t.s + '</code>';
     else if (t.k === 3) out += t.s;
