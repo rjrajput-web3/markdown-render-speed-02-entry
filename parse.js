@@ -1477,6 +1477,36 @@ function processEmphasis(tokens) {
     const closer = stack[i];
     if (closer.n === 0 || !closer.canClose) { i++; continue; }
     let oi = -1;
+    // hasBlockingSingle(j, i): a dead single delimiter of the closer's
+    // char strictly between opener j and closer i, that can only close
+    // (it was blocked from matching by the strong-pair rule), with no
+    // unmatched opener between the opener and it. Such a delimiter
+    // changes the outer match: it unblocks the strong-pair block and
+    // caps the outer use at 1 ('**a **c**d* e**' forms '<em>', while
+    // '**a *b **c**d* e**' has the unmatched '*b' opener in between
+    // and still forms '<strong>').
+    const hasBlockingSingle = (j, i) => {
+      // Only the closer's first match: once it has formed an emphasis
+      // the leftovers stay literal (no second, nested '<em>').
+      if (closer.closeTags !== null && closer.closeTags.length > 0) return false;
+      // Only for the outermost available opener: a nearer opener
+      // ('*b' in '**a *b **c**d* e**') must still be pair-blocked.
+      for (let e = 0; e < j; e++) {
+        const u = stack[e];
+        if (u.c === closer.c && u.n > 0 && u.canOpen && !u.dead) return false;
+      }
+      for (let d = j + 1; d < i; d++) {
+        const t = stack[d];
+        if (t.c !== closer.c || t.n !== 1 || !t.dead || !t.canClose || t.canOpen) continue;
+        let hasOpener = false;
+        for (let e = j + 1; e < d; e++) {
+          const u = stack[e];
+          if (u.n > 0 && u.canOpen && !u.dead) { hasOpener = true; break; }
+        }
+        if (!hasOpener) return true;
+      }
+      return false;
+    };
     for (let j = i - 1; j >= 0; j--) {
       const o = stack[j];
       if (o === bottom[closer.c]) break;
@@ -1496,8 +1526,9 @@ function processEmphasis(tokens) {
       if (((o.canOpen && o.canClose) || (closer.canOpen && closer.canClose)) && sum3) continue;
       // Intervening-pair rule: if the sum is a multiple of 3 and a
       // matched pair sits strictly between this opener and the closer
-      // whose closer can open, the match is blocked and the look-back
-      // stops (the closer cannot skip past the blocked opener).
+      // whose closer can open, the match is blocked and this opener
+      // is skipped (the look-back continues to earlier openers:
+      // '**a *b **c**d* e**' must still reach the outer '**').
       // This is what keeps '**a *b*c* d**' from matching the outer
       // '*' across the inner '<em>b</em>' pair. It only blocks when
       // the opener run still has length >= 2: '*a *b*c**' (opener
@@ -1509,7 +1540,7 @@ function processEmphasis(tokens) {
           const pr = matchedPairs[p];
           if (pr[0] > j && pr[1] < i && stack[pr[0]].c === closer.c && stack[pr[1]].canOpen) { intervening = true; break; }
         }
-        if (intervening) break;
+        if (intervening) continue;
       }
       // Pair block: an intervening matched pair of the same delimiter
       // char, adjacent to this closer (the nearest matched pair
@@ -1541,7 +1572,7 @@ function processEmphasis(tokens) {
           const pr = matchedPairs[p];
           if (pr[0] > j && pr[1] < i && pr[1] > nearestClose) { nearest = p; nearestClose = pr[1]; }
         }
-        if (nearest !== -1) {
+        if (nearest !== -1 && !hasBlockingSingle(j, i)) {
           const pr = matchedPairs[nearest];
           if (stack[pr[0]].c === closer.c) {
             const nx = stack[pr[1]].nx;
@@ -1550,9 +1581,9 @@ function processEmphasis(tokens) {
             const rightAttached = nx === 126 || isAlnum(nx);
             const leftIsolated = !(pv === 126 || pv === 42 || isAlnum(pv));
             if (rightAttached && leftIsolated) {
-              if (use === 1 && pr[2] === 2) break;
-              if (use === 1 && pr[2] === 1 && o.n >= 2) break;
-              if (use === 2 && pr[2] === 1 && closer.n === 2 && pr[1] === i - 1) break;
+              if (use === 1 && pr[2] === 2) continue;
+              if (use === 1 && pr[2] === 1 && o.n >= 2) continue;
+              if (use === 2 && pr[2] === 1 && closer.n === 2 && pr[1] === i - 1) continue;
             }
           }
         }
@@ -1569,12 +1600,19 @@ function processEmphasis(tokens) {
       continue;
     }
     const opener = stack[oi];
-    const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
+    // A blocking single '*' between opener and closer caps the use at
+    // 1 ('**a **c**d* e**' forms '<em>', not '<strong>').
+    const use = (opener.n >= 2 && closer.n >= 2 && !hasBlockingSingle(oi, i)) ? 2 : 1;
     const tag = closer.c === '~' ? 'del' : use === 2 ? 'strong' : 'em';
     if (opener.openTags === null) opener.openTags = [];
     if (closer.closeTags === null) closer.closeTags = [];
     opener.openTags.push(tag);
     closer.closeTags.push(tag);
+    // When the use is 1 but the closer still had length >= 2 (the
+    // capped case), the opener's leftover delimiter renders INSIDE
+    // the emphasis ('**a **c**d* e**' -> '<em>*a ...'). Otherwise
+    // (closer length 1, e.g. '**foo*') it renders OUTSIDE.
+    if (use === 1 && closer.n >= 2) opener.leftoverInside = true;
     opener.n -= use;
     closer.n -= use;
     matchedPairs.push([oi, i, use]);
@@ -1590,8 +1628,16 @@ function renderTokens(tokens) {
     if (t.k === 0) out += escapeText(t.s);
     else if (t.k === 1) {
       if (t.closeTags !== null) for (const tag of t.closeTags) out += '</' + tag + '>';
-      if (t.n > 0) out += t.c.repeat(t.n);
-      if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+      // An opener whose match was capped (use=1, closer length >= 2)
+      // renders its leftover delimiter INSIDE the tag; all other
+      // leftovers render OUTSIDE (before the open tag).
+      if (t.leftoverInside) {
+        if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+        if (t.n > 0) out += t.c.repeat(t.n);
+      } else {
+        if (t.n > 0) out += t.c.repeat(t.n);
+        if (t.openTags !== null) for (let x = t.openTags.length - 1; x >= 0; x--) out += '<' + t.openTags[x] + '>';
+      }
     } else if (t.k === 2) out += '<code>' + t.s + '</code>';
     else if (t.k === 3) out += t.s;
     else if (t.k === 4) out += '<br>';
