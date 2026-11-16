@@ -379,6 +379,33 @@ function findRefLabelEnd(s, start) {
   return -1;
 }
 
+// labelHasUnclosedBacktick(label): true when the label holds a
+// backtick run with no matching closer run of the same length later
+// in the label (greedy code-span pairing: a run pairs with the next
+// run of the same length). E.g. '[a ``b` c]' has two unclosed runs;
+// '[a `b` c]' pairs into a code span and has none.
+function labelHasUnclosedBacktick(label) {
+  const open = new Map();
+  let i = 0;
+  const n = label.length;
+  while (i < n) {
+    const c = label.charCodeAt(i);
+    if (c === 92) { i += 2; continue; }
+    if (c === 96) {
+      let m = 0;
+      while (i + m < n && label.charCodeAt(i + m) === 96) m++;
+      const cnt = open.get(m) || 0;
+      if (cnt > 0) open.set(m, cnt - 1);
+      else open.set(m, cnt + 1);
+      i += m;
+      continue;
+    }
+    i++;
+  }
+  for (const v of open.values()) if (v > 0) return true;
+  return false;
+}
+
 // hasUnescapedOpenBracket(s): true when s contains a '[' that is not
 // backslash-escaped.
 function hasUnescapedOpenBracket(s) {
@@ -392,10 +419,46 @@ function hasUnescapedOpenBracket(s) {
 // findLabelEnd(s, start): index of the ']' balancing the '[' at start-1,
 // honouring backslash escapes, code spans, and '<...>' autolinks / HTML
 // tags (a ']' inside one of those does not close the label). -1 when none.
+// labelBackticksValid(label): false when the label holds an unclosed
+// backtick run AND either a code span was formed or it is the only
+// run (the label-validity rule of findLabelEnd). Used to vet a
+// candidate label end found inside a code span's content.
+function labelBackticksValid(label) {
+  const open = new Map();
+  let spans = 0;
+  let i = 0;
+  const n = label.length;
+  while (i < n) {
+    const c = label.charCodeAt(i);
+    if (c === 92) { i += 2; continue; }
+    if (c === 96) {
+      let m = 0;
+      while (i + m < n && label.charCodeAt(i + m) === 96) m++;
+      const cnt = open.get(m) || 0;
+      if (cnt > 0) { open.set(m, cnt - 1); spans++; }
+      else open.set(m, cnt + 1);
+      i += m;
+      continue;
+    }
+    i++;
+  }
+  let unclosed = 0;
+  for (const v of open.values()) unclosed += v;
+  return !(unclosed > 0 && (spans > 0 || unclosed === 1));
+}
+
 function findLabelEnd(s, start) {
   let depth = 1;
   let i = start;
   const n = s.length;
+  // Backtick-run accounting for the label-validity rule: a label is
+  // not a link label when it holds an unclosed backtick run AND
+  // either a code span was formed or it is the only run
+  // ('[a `b](c)' and '[a `b`c`d](u)' are not links, but
+  // '[a ``b` c](u)' — two unclosed runs of different lengths, no
+  // code span — is). Runs are counted as they are scanned.
+  let spansFormed = 0;
+  let unclosedRuns = 0;
   while (i < n) {
     const c = s.charCodeAt(i);
     if (c === 92) { i += 2; continue; } // backslash escape
@@ -406,27 +469,58 @@ function findLabelEnd(s, start) {
       if (closeEnd !== -1) {
         // If a ']' at the current depth appears before the closing
         // run and the closing run is on a later line than that ']',
-        // the code span does not contain the ']': the ']' ends the
-        // label (e.g. '[run ``response`][ref]' — the lone '`' after
-        // 'response' would otherwise swallow the ']' to a far close).
-        // A ']' on the same line as the close stays inside the code
-        // span (e.g. '[not a `link](/foo`)').
+        // or an unescaped '[' appears between that ']' and the
+        // closing run, the code span does not contain the ']': the
+        // ']' ends the label (e.g. '[run ``response`][ref]' — the
+        // lone '`' after 'response' would otherwise swallow the ']'
+        // to a far close; '[values ``guide` in](#should)' — the
+        // lone '`' after 'guide' would swallow it to '`a_b`').
+        // A ']' on the same line as the close, with no '[' between,
+        // stays inside the code span (e.g. '[not a `link](/foo`)',
+        // '[a `b](c` d](u)').
         let j = i + m;
         let d = depth;
         let labelEnd = -1;
+        let hasOpenAfter = false;
+        let hasNewlineAfter = false;
         while (j < closeEnd) {
           const cc = s.charCodeAt(j);
           if (cc === 92) { j += 2; continue; }
-          if (cc === 91) { d++; j++; continue; }
+          if (cc === 10) { if (labelEnd !== -1) hasNewlineAfter = true; j++; continue; }
+          if (cc === 91) { d++; if (labelEnd !== -1) hasOpenAfter = true; j++; continue; }
           if (cc === 93) {
             d--;
-            if (d === 0) { labelEnd = j; break; }
+            if (d === 0 && labelEnd === -1) { labelEnd = j; j++; continue; }
             j++;
             continue;
           }
           j++;
         }
-        if (labelEnd !== -1 && s.indexOf('\n', labelEnd, closeEnd) !== -1) return labelEnd;
+        if (labelEnd !== -1) {
+          // The ']' ends the label when the code span does not contain
+          // it: a newline or an unescaped '[' follows it and the next
+          // char is '(', or the ']' is followed by a complete inline
+          // link tail ('(...)') that ends before the closing run
+          // ('[a ``b` c](u) *em* `f`' — the lone '`' after 'b' would
+          // otherwise swallow the ']' to the '`' before 'f').
+          // A ']' whose tail is incomplete before the close stays
+          // inside the code span ('[a `b](c` d](u)'). And the label
+          // prefix itself must be backtick-valid: '[a `b](c) `x`'
+          // has a single unclosed run, so its ']' is not a label end
+          // even though a complete tail follows it.
+          if (!labelBackticksValid(s.slice(start, labelEnd))) {
+            // fall through: the code span swallows the ']'
+          } else if (hasNewlineAfter) return labelEnd;
+          else if (hasOpenAfter && s.charCodeAt(labelEnd + 1) === 40) return labelEnd;
+          else if (s.charCodeAt(labelEnd + 1) === 40) {
+            const tail = parseInlineLinkTail(s, labelEnd + 1);
+            // The tail must end strictly before the closing run, with
+            // content between its ')' and the closer: when the tail
+            // ends exactly at the closer ('[foo`](/uri)`'), the ']'
+            // is the code span's own content, not a label end.
+            if (tail && tail.end < closeEnd - m) return labelEnd;
+          }
+        }
         // A code span whose content holds a backtick only counts as
         // opaque when its closing run is immediately followed by the
         // label's ']'; otherwise the label is not a link label at all
@@ -435,9 +529,11 @@ function findLabelEnd(s, start) {
         if (s.indexOf('`', i + m) !== -1 && s.indexOf('`', i + m) < closeEnd - m) {
           if (closeEnd >= n || s.charCodeAt(closeEnd) !== 93) return -1;
         }
+        spansFormed++;
         i = closeEnd;
         continue;
       }
+      unclosedRuns++;
       i += m;
       continue;
     }
@@ -452,7 +548,10 @@ function findLabelEnd(s, start) {
     if (c === 91) depth++;
     else if (c === 93) {
       depth--;
-      if (depth === 0) return i;
+      if (depth === 0) {
+        if (unclosedRuns > 0 && (spansFormed > 0 || unclosedRuns === 1)) return -1;
+        return i;
+      }
     }
     i++;
   }
@@ -672,8 +771,8 @@ function finishLink(labelRaw, dest, title, end, refs, isImage) {
   const plain = renderPlain(labelTokens);
   const href = escapeHref(dest);
   const titleAttr = title === null ? null : escapeText(title);
-  if (isImage) return { token: { k: 7, src: href, title: titleAttr, alt: plain, plain }, end };
-  return { token: { k: 6, href, title: titleAttr, html, plain }, end };
+  if (isImage) return { token: { k: 7, src: href, title: titleAttr, alt: plain, plain }, end, labelRaw };
+  return { token: { k: 6, href, title: titleAttr, html, plain }, end, labelRaw };
 }
 
 // ---- inline HTML ----------------------------------------------------------
@@ -813,13 +912,18 @@ function trimAutolinkEnd(s, a, b) {
   // trailing trims
   while (b > a) {
     const c = s.charCodeAt(b - 1);
-    if (c === 41) { // unbalanced ')'
-      let opens = 0, closes = 0;
+    if (c === 41) { // trailing ')': trim only if it is NOT a group-closer
+      // A ')' is a group-closer when a stack scan pairs it with a '(';
+      // an unmatched ')' earlier in the path does not make this one
+      // unmatched (e.g. '...page=4)](./docs/create.md)' keeps its final
+      // ')', which closes the '(' before './docs').
+      let depth = 0, matched = false;
       for (let i = a; i < b; i++) {
-        if (s.charCodeAt(i) === 40) opens++;
-        else if (s.charCodeAt(i) === 41) closes++;
+        const cc = s.charCodeAt(i);
+        if (cc === 40) depth++;
+        else if (cc === 41 && depth > 0) { depth--; if (i === b - 1) matched = true; }
       }
-      if (closes > opens) { b--; continue; }
+      if (!matched) { b--; continue; }
       break;
     }
     if (isAutolinkTrailPunct(c)) {
@@ -1088,6 +1192,14 @@ function tokenizeInline(src, refs, noLinks, noBare) {
   // Emphasis delimiters before it are literal text (a failed '[...](...)'
   // attempt suppresses emphasis in its label).
   let noEmphEnd = -1;
+  // suppressEmphUntil: index of the next backtick after a link whose
+  // label holds an unclosed backtick run. Emphasis delimiters before
+  // it are literal text: the unclosed '`' in the label pairs with
+  // that later backtick as a code span, swallowing the emphasis
+  // ('[a ``b` c](u) *em* [d `e`](v)' leaves '*em*' literal, but
+  // '*em2*' after the code span forms). Set only when a later
+  // backtick exists; a link with no later backtick suppresses nothing.
+  let suppressEmphUntil = -1;
   const flush = (to) => {
     if (to > textStart) tokens.push({ k: 0, s: src.slice(textStart, to) });
   };
@@ -1156,7 +1268,7 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       while (i + m < n && src.charCodeAt(i + m) === c) m++;
       // Inside a failed inline-link label, emphasis delimiters are
       // literal text.
-      if (i < noEmphEnd) { i += m; continue; }
+      if (i < noEmphEnd || i < suppressEmphUntil) { i += m; continue; }
       const prev = i > 0 ? src.charCodeAt(i - 1) : -1;
       const next = i + m < n ? src.charCodeAt(i + m) : -1;
       const { canOpen, canClose } = delimCanOpenClose(ch, prev, next);
@@ -1172,7 +1284,7 @@ function tokenizeInline(src, refs, noLinks, noBare) {
       if (m <= 2) {
         // Inside a failed inline-link label, strikethrough delimiters
         // are literal text.
-        if (i < noEmphEnd) { i += m; continue; }
+        if (i < noEmphEnd || i < suppressEmphUntil) { i += m; continue; }
         const prev = i > 0 ? src.charCodeAt(i - 1) : -1;
         const next = i + m < n ? src.charCodeAt(i + m) : -1;
         const { canOpen, canClose } = delimCanOpenClose('~', prev, next);
@@ -1192,6 +1304,12 @@ function tokenizeInline(src, refs, noLinks, noBare) {
         tokens.push(r.token);
         i = r.end;
         textStart = i;
+        // A link whose label holds an unclosed backtick run suppresses
+        // emphasis until the next backtick (see suppressEmphUntil).
+        if (r.labelRaw && labelHasUnclosedBacktick(r.labelRaw)) {
+          const nx = src.indexOf('`', i);
+          if (nx !== -1) suppressEmphUntil = nx;
+        }
         continue;
       }
       // A failed inline-link attempt suppresses emphasis in its label,
@@ -1217,6 +1335,10 @@ function tokenizeInline(src, refs, noLinks, noBare) {
         tokens.push(r.token);
         i = r.end;
         textStart = i;
+        if (r.labelRaw && labelHasUnclosedBacktick(r.labelRaw)) {
+          const nx = src.indexOf('`', i);
+          if (nx !== -1) suppressEmphUntil = nx;
+        }
         continue;
       }
       // A failed image-link attempt suppresses emphasis in its label,
@@ -1377,8 +1499,11 @@ function processEmphasis(tokens) {
       // whose closer can open, the match is blocked and the look-back
       // stops (the closer cannot skip past the blocked opener).
       // This is what keeps '**a *b*c* d**' from matching the outer
-      // '*' across the inner '<em>b</em>' pair.
-      if (sum3) {
+      // '*' across the inner '<em>b</em>' pair. It only blocks when
+      // the opener run still has length >= 2: '*a *b*c**' (opener
+      // length 1) DOES form the outer '<em>' across the inner pair,
+      // while '**a *b*c*' (opener length 2) does not.
+      if (sum3 && o.n >= 2) {
         let intervening = false;
         for (let p = 0; p < matchedPairs.length; p++) {
           const pr = matchedPairs[p];
@@ -1386,36 +1511,48 @@ function processEmphasis(tokens) {
         }
         if (intervening) break;
       }
-      // Strong-pair block: an intervening matched STRONG pair of the
-      // same delimiter char, adjacent to this closer (the nearest
-      // matched pair strictly between opener and closer), blocks an
-      // EMPHASIS (single-delimiter) match when the strong pair is
-      // isolated on the left (the char before its opener is not
-      // alphanumeric, '~' or '*') and attached on the right (the char
-      // after its closer is alphanumeric or '~'). E.g.
-      // '*a **b**c*' stays literal, but '*a **b** c*' (space after
-      // '**') and '*foo**bar**baz*' (opener attached to 'foo') form
-      // '<em>'. A nearer emphasis pair ('*a **b**c*d*e*') unblocks it.
-      // A STRONG outer match is never blocked by this rule
-      // ('**a *b **c**d* e**' forms '<strong>').
+      // Pair block: an intervening matched pair of the same delimiter
+      // char, adjacent to this closer (the nearest matched pair
+      // strictly between opener and closer), blocks the match when
+      // the pair is isolated on the left (the char before its opener
+      // is not alphanumeric, '~' or '*') and attached on the right
+      // (the char after its closer is alphanumeric or '~'):
+      //  - a STRONG pair blocks an EMPHASIS (use=1) match
+      //    ('*a **b**c*' stays literal; '*a **b** c*' and
+      //    '*foo**bar**baz*' form '<em>'; a nearer emphasis pair
+      //    ('*a **b**c*d*e*') unblocks it). A STRONG outer match is
+      //    never blocked by a strong pair.
+      //  - an EMPHASIS pair blocks an EMPHASIS match when the outer
+      //    opener still has length >= 2 ('**a *b*c*' and
+      //    '***a *b*c*' stay literal; '*a *b*c*' and '*a *b*c**'
+      //    with opener length 1 form '<em>').
+      //  - an EMPHASIS pair blocks a STRONG (use=2) match when the
+      //    outer closer is fully consumed (length == use) and the
+      //    pair's closer is the delimiter immediately before this
+      //    closer ('**a *b*c**' stays literal; '**a*b*c**' forms
+      //    '<strong>' because the pair is not isolated, and
+      //    '**a *b*c* d**' forms '<strong>' because an unmatched '*'
+      //    sits between the pair and the closing '**').
       {
         const use = (o.n >= 2 && closer.n >= 2) ? 2 : 1;
-        if (use === 1) {
-          let nearest = -1;
-          let nearestClose = -1;
-          for (let p = 0; p < matchedPairs.length; p++) {
-            const pr = matchedPairs[p];
-            if (pr[0] > j && pr[1] < i && pr[1] > nearestClose) { nearest = p; nearestClose = pr[1]; }
-          }
-          if (nearest !== -1) {
-            const pr = matchedPairs[nearest];
-            if (pr[2] === 2 && stack[pr[0]].c === closer.c) {
-              const nx = stack[pr[1]].nx;
-              const pv = stack[pr[0]].pv;
-              const isAlnum = (x) => (x >= 48 && x <= 57) || (x >= 65 && x <= 90) || (x >= 97 && x <= 122) || (x >= 128 && /[\p{L}\p{N}]/u.test(String.fromCharCode(x)));
-              const rightAttached = nx === 126 || isAlnum(nx);
-              const leftIsolated = !(pv === 126 || pv === 42 || isAlnum(pv));
-              if (rightAttached && leftIsolated) break;
+        let nearest = -1;
+        let nearestClose = -1;
+        for (let p = 0; p < matchedPairs.length; p++) {
+          const pr = matchedPairs[p];
+          if (pr[0] > j && pr[1] < i && pr[1] > nearestClose) { nearest = p; nearestClose = pr[1]; }
+        }
+        if (nearest !== -1) {
+          const pr = matchedPairs[nearest];
+          if (stack[pr[0]].c === closer.c) {
+            const nx = stack[pr[1]].nx;
+            const pv = stack[pr[0]].pv;
+            const isAlnum = (x) => (x >= 48 && x <= 57) || (x >= 65 && x <= 90) || (x >= 97 && x <= 122) || (x >= 128 && /[\p{L}\p{N}]/u.test(String.fromCharCode(x)));
+            const rightAttached = nx === 126 || isAlnum(nx);
+            const leftIsolated = !(pv === 126 || pv === 42 || isAlnum(pv));
+            if (rightAttached && leftIsolated) {
+              if (use === 1 && pr[2] === 2) break;
+              if (use === 1 && pr[2] === 1 && o.n >= 2) break;
+              if (use === 2 && pr[2] === 1 && closer.n === 2 && pr[1] === i - 1) break;
             }
           }
         }
