@@ -1508,6 +1508,10 @@ function tokenizeInline(src, refs, noLinks, noBare) {
           } else if (hasAttr && (textBefore || textAfter)) {
             bareOff = true;
           }
+          // An '<a ...>' tag whose raw text spans a newline also
+          // suppresses later bare autolinks even when it stands alone
+          // in its paragraph ('<a href="foo\\\nbar">').
+          if (tag.indexOf('\n') !== -1) bareOff = true;
         }
         i = h;
         textStart = i;
