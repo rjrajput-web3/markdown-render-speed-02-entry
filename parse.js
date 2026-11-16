@@ -1478,13 +1478,35 @@ function tokenizeInline(src, refs, noLinks, noBare) {
           (tag.charCodeAt(3) === 32 || tag.charCodeAt(3) === 9 || tag.charCodeAt(3) === 10 || tag.charCodeAt(3) === 62)) {
           bareOff = false;
         }
-        if (tag.length >= 5 && (tag.charCodeAt(1) === 97 || tag.charCodeAt(1) === 65) &&
-          (tag.charCodeAt(2) === 32 || tag.charCodeAt(2) === 9 || tag.charCodeAt(2) === 10 || tag.charCodeAt(2) === 47 || tag.charCodeAt(2) === 62) &&
-          tag.charCodeAt(tag.length - 2) === 47 && tag.charCodeAt(tag.length - 1) === 62 &&
-          (tag.charCodeAt(tag.length - 3) === 32 || tag.charCodeAt(tag.length - 3) === 9 || tag.charCodeAt(tag.length - 3) === 10)) {
+        // An '<a>' tag suppresses later bare autolinks (marked quirk)
+        // when it has attributes and is adjacent to text:
+        //  - self-closing '<a ... />' (whitespace before '/>'):
+        //    text after it and NO text before it in this inline run
+        //    ('<a  />foo' suppresses; 'foo <a href="u" />bar' and
+        //    '<a/>' do not);
+        //  - open '<a ...>' with attributes: text before it OR after
+        //    it ('foo <a href="&ouml;">', '<a href="u">foo' suppress;
+        //    '<a href="u">' alone and '<a>foo' do not).
+        // Angle autolinks and '[x](u)' still work.
+        if (tag.length >= 3 && (tag.charCodeAt(1) === 97 || tag.charCodeAt(1) === 65) &&
+          (tag.charCodeAt(2) === 32 || tag.charCodeAt(2) === 9 || tag.charCodeAt(2) === 10 || tag.charCodeAt(2) === 47 || tag.charCodeAt(2) === 62)) {
+          const selfClosing = tag.charCodeAt(tag.length - 2) === 47 && tag.charCodeAt(tag.length - 1) === 62 &&
+            (tag.charCodeAt(tag.length - 3) === 32 || tag.charCodeAt(tag.length - 3) === 9 || tag.charCodeAt(tag.length - 3) === 10);
+          const hasAttr = tag.charCodeAt(2) === 32 || tag.charCodeAt(2) === 9 || tag.charCodeAt(2) === 10;
+          let textBefore = false;
+          for (let q = 0; q < i; q++) {
+            const qc = src.charCodeAt(q);
+            if (qc !== 32 && qc !== 9 && qc !== 10) { textBefore = true; break; }
+          }
+          let textAfter = false;
           for (let q = h; q < n; q++) {
             const qc = src.charCodeAt(q);
-            if (qc !== 32 && qc !== 9 && qc !== 10) { bareOff = true; break; }
+            if (qc !== 32 && qc !== 9 && qc !== 10) { textAfter = true; break; }
+          }
+          if (selfClosing) {
+            if (textAfter) bareOff = true;
+          } else if (hasAttr && (textBefore || textAfter)) {
+            bareOff = true;
           }
         }
         i = h;
