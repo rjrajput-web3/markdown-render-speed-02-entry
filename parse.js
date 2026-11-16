@@ -1503,7 +1503,18 @@ function processEmphasis(tokens) {
           const u = stack[e];
           if (u.n > 0 && u.canOpen && !u.dead) { hasOpener = true; break; }
         }
-        if (!hasOpener) return true;
+        if (hasOpener) continue;
+        // The pair that blocked this single delimiter must be a
+        // STRONG pair: '**a **c**d* e**' caps the outer use at 1
+        // ('<em>'), but '**public as *so*other* option html**'
+        // (blocked by an EM pair) still forms '<strong>'.
+        let nearestClose = -1;
+        let nearestUse = 0;
+        for (let p = 0; p < matchedPairs.length; p++) {
+          const pr = matchedPairs[p];
+          if (pr[0] > j && pr[1] < d && pr[1] > nearestClose) { nearestClose = pr[1]; nearestUse = pr[2]; }
+        }
+        if (nearestUse === 2) return true;
       }
       return false;
     };
@@ -1582,7 +1593,13 @@ function processEmphasis(tokens) {
             const leftIsolated = !(pv === 126 || pv === 42 || isAlnum(pv));
             if (rightAttached && leftIsolated) {
               if (use === 1 && pr[2] === 2) continue;
-              if (use === 1 && pr[2] === 1 && o.n >= 2) continue;
+              // An EM pair blocks an EM match when the opener still
+              // has length >= 2, or when this closer has already
+              // matched once ('**public as *so*other* option html**':
+              // after the first '<em>' the opener is length 1, but
+              // the second, nested '<em>' must still be blocked).
+              const closerMatched = closer.closeTags !== null && closer.closeTags.length > 0;
+              if (use === 1 && pr[2] === 1 && (o.n >= 2 || closerMatched)) continue;
               if (use === 2 && pr[2] === 1 && closer.n === 2 && pr[1] === i - 1) continue;
             }
           }
